@@ -1,33 +1,53 @@
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
 from typing import List
+import models
+import schemas
+import database
 
 app = FastAPI()
 
-# Temporary "database" (replace with SQLAlchemy later)
-tasks_db = []
+# Create tables (only needed once)
+models.Base.metadata.create_all(bind=database.engine)
 
-class Task(BaseModel):
-    title: str
-    description: str | None = None
-    status: str = "pending"  # or "completed"
-
-# Create a task
-@app.post("/tasks")
-def create_task(task: Task):
-    tasks_db.append(task.dict())
-    return {"message": "Task created!", "task": task}
-
-# Get all tasks
-@app.get("/tasks")
-def get_tasks():
-    return {"tasks": tasks_db}
-
-# Get a single task by ID
-@app.get("/tasks/{task_id}")
-def get_task(task_id: int):
+# Dependency to get DB session
+def get_db():
+    db = database.SessionLocal()
     try:
-        return tasks_db[task_id]
-    except IndexError:
+        yield db
+    finally:
+        db.close()
+
+# Updated POST endpoint
+@app.post("/tasks", response_model=schemas.Task)
+def create_task(task: schemas.TaskCreate, db: Session = Depends(get_db)):
+    db_task = models.DBTask(**task.dict())
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+# Updated GET all endpoint
+@app.get("/tasks", response_model=List[schemas.Task])
+def read_tasks(db: Session = Depends(get_db)):
+    return db.query(models.DBTask).all()
+
+@app.put("/tasks/{task_id}", response_model=schemas.Task)
+def update_task(task_id: int, task: schemas.TaskCreate, db: Session = Depends(get_db)):
+    db_task = db.query(models.DBTask).filter(models.DBTask.id == task_id).first()
+    if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
+    for key, value in task.model_dump().items():
+        setattr(db_task, key, value)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(models.DBTask).filter(models.DBTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    db.delete(task)
+    db.commit()
+    return {"message": "Task deleted"}
